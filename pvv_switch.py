@@ -27,7 +27,7 @@ class SimpleSwitch13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     PVV_TABLE = 1
-    FAILURE_TABLE = 200
+    FAILURE_TABLE = 253
     # control plane 0 is OF, starting at table 2
     # control plane 1 is OSPF starting at table 100
     CP_TABLES = [2, 100]
