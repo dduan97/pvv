@@ -139,6 +139,63 @@ class SimpleSwitch13(app_manager.RyuApp):
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
+
+    def set_empty_pvv_rules(self, datapath, preferences, availabilities):
+        ofproto_parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+        # first send the initialization for pvv. This will match any packet that doesn't
+        # have a vlan_vid tag
+        empty_pvv_match = ofproto_parser.OFPMatch(vlan_vid=0x0000)
+
+        # action will be to take the most preferred CP
+        empty_pvv_actions = []
+
+        cp_to_take = None
+        for cp in preferences:
+            mask = 1 << cp
+            if (mask & availabilities) == 0:
+                cp_to_take = cp
+
+        if cp_to_take == None:
+            self.set_else_rule(datapath, self.PVV_TABLE, empty_pvv_match)
+            return
+
+        empty_pvv_actions.append(
+                ofproto_parser.OFPActionPushVlan()
+                )
+        empty_pvv_actions.append(
+                ofproto_parser.OFPActionSetField(vlan_vid=(0x1000 | cp_to_take))
+                )
+        empty_pvv_actions.append(
+                ofproto_parser.OFPActionSetField(vlan_pcp=cp_to_take)
+            )
+
+        empty_pvv_actions.append(ofproto_parser.NXActionResubmitTable(table_id=self.CP_TABLES[cp_to_take]))
+
+        empty_pvv_mod = ofproto_parser.OFPFlowMod(
+                    datapath,
+                    table_id=self.PVV_TABLE,
+                    command=datapath.ofproto.OFPFC_ADD,
+                    match=empty_pvv_match,
+                    instructions=[ofproto_parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions=empty_pvv_actions)])
+        datapath.send_msg(empty_pvv_mod)
+
+    def set_else_rule(self, datapath, table_id, match):
+        ofproto_parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
+        to_controller_action = ofproto_parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)
+
+        else_mod = ofproto_parser.OFPFlowMod(
+                    datapath,
+                    table_id=table_id,
+                    command=datapath.ofproto.OFPFC_ADD,
+                    match=match,
+                    instructions=[ofproto_parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions=[to_controller_action])])
+        datapath.send_msg(else_mod)
+
+
+
     # preferences is a list of control planes in order
     # availabilities is an integer representation of available protocols
     #   in the same format of PVV
@@ -146,11 +203,14 @@ class SimpleSwitch13(app_manager.RyuApp):
     def set_pvv_rules(self, datapath, preferences, availabilities):
         ofproto_parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
+
+        self.set_empty_pvv_rules(datapath, preferences, availabilities)
+
         # get the packet info
         for current_cp in preferences:
             # 2^k iterations, one for each PVV. Should be able to wildcard
             # this later
-            for pvv_match in xrange(2**len(preferences)):
+            for pvv_match in xrange(1, 2**len(preferences)):
 
                 match = ofproto_parser.OFPMatch(
                     vlan_vid=(0x1000 | pvv_match),
@@ -172,12 +232,12 @@ class SimpleSwitch13(app_manager.RyuApp):
 
                 t1_actions = []
                 failure_actions = []
-                to_controller_action = ofproto_parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)
 
                 if len(best_cps) == 0:
                     # all flow rules should just be to send to controller
-                    t1_actions.append(to_controller_action)
-                    failure_actions.append(to_controller_action)
+                    self.set_else_rule(datapath, self.PVV_TABLE, match)
+                    self.set_else_rule(datapath, self.PVV_TABLE, match)
+                    return
 
 
                 else:
@@ -199,7 +259,8 @@ class SimpleSwitch13(app_manager.RyuApp):
                     t1_actions.append(ofproto_parser.NXActionResubmitTable(table_id=self.CP_TABLES[t1_cp]))
 
                     if len(best_cps) == 1:
-                        failure_actions.append(to_controller_action)
+                        self.set_else_rule(datapath, self.FAILURE_TABLE, match)
+                        return
                     else:
                         failure_cp = best_cps[1]
                         failure_actions.append(ofproto_parser.NXActionResubmitTable(table_id=self.CP_TABLES[failure_cp]))
